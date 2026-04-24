@@ -1,5 +1,12 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
 import {
+  createUserWithEmailAndPassword,
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+import {
   getDatabase,
   onValue,
   push,
@@ -21,8 +28,13 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
 const db = getDatabase(app);
-const contactsRef = ref(db, "contacts");
+
+const registerForm = document.getElementById("registerForm");
+const loginForm = document.getElementById("loginForm");
+const logoutBtn = document.getElementById("logoutBtn");
+const authStatus = document.getElementById("authStatus");
 
 const contactForm = document.getElementById("contactForm");
 const contactIdInput = document.getElementById("contactId");
@@ -31,6 +43,33 @@ const cancelEditBtn = document.getElementById("cancelEditBtn");
 const contactTableBody = document.getElementById("contactTableBody");
 
 const fieldIds = ["name", "email", "phone", "city", "note"];
+
+let currentUser = null;
+let unsubscribeContacts = null;
+
+const toggleContactForm = (enabled) => {
+  [...fieldIds, "submitBtn", "cancelEditBtn"].forEach((id) => {
+    document.getElementById(id).disabled = !enabled;
+  });
+
+  if (!enabled) {
+    contactForm.setAttribute("aria-disabled", "true");
+    cancelEditBtn.classList.add("d-none");
+    submitBtn.textContent = "Simpan Data";
+    contactForm.reset();
+    contactIdInput.value = "";
+  } else {
+    contactForm.setAttribute("aria-disabled", "false");
+  }
+};
+
+const showEmptyRow = (message) => {
+  contactTableBody.innerHTML = `
+    <tr>
+      <td colspan="6" class="text-center text-secondary">${message}</td>
+    </tr>
+  `;
+};
 
 const getFormValues = () => ({
   name: document.getElementById("name").value.trim(),
@@ -62,6 +101,8 @@ const beginEditState = (id, contact) => {
   window.scrollTo({ top: 0, behavior: "smooth" });
 };
 
+const contactsRefByUid = (uid) => ref(db, `users/${uid}/contacts`);
+
 const createActionButtons = (id, contact) => {
   const wrapper = document.createElement("div");
   wrapper.className = "d-flex gap-2 justify-content-center";
@@ -75,11 +116,13 @@ const createActionButtons = (id, contact) => {
   deleteBtn.className = "btn btn-sm btn-danger action-btn";
   deleteBtn.textContent = "Hapus";
   deleteBtn.addEventListener("click", async () => {
+    if (!currentUser) return;
+
     const isConfirmed = window.confirm(`Hapus data ${contact.name}?`);
     if (!isConfirmed) return;
 
     try {
-      await remove(ref(db, `contacts/${id}`));
+      await remove(ref(db, `users/${currentUser.uid}/contacts/${id}`));
     } catch (error) {
       window.alert(`Gagal menghapus data: ${error.message}`);
     }
@@ -89,39 +132,101 @@ const createActionButtons = (id, contact) => {
   return wrapper;
 };
 
-onValue(contactsRef, (snapshot) => {
-  const data = snapshot.val();
-  contactTableBody.innerHTML = "";
+const startContactsListener = (uid) => {
+  const contactsRef = contactsRefByUid(uid);
 
-  if (!data) {
-    contactTableBody.innerHTML = `
-      <tr>
-        <td colspan="6" class="text-center text-secondary">Belum ada data.</td>
-      </tr>
-    `;
-    return;
+  unsubscribeContacts = onValue(contactsRef, (snapshot) => {
+    const data = snapshot.val();
+    contactTableBody.innerHTML = "";
+
+    if (!data) {
+      showEmptyRow("Belum ada data.");
+      return;
+    }
+
+    Object.entries(data).forEach(([id, contact]) => {
+      const row = document.createElement("tr");
+
+      [contact.name, contact.email, contact.phone, contact.city, contact.note].forEach((value) => {
+        const cell = document.createElement("td");
+        cell.textContent = value || "-";
+        row.appendChild(cell);
+      });
+
+      const actionCell = document.createElement("td");
+      actionCell.className = "text-center";
+      actionCell.appendChild(createActionButtons(id, contact));
+      row.appendChild(actionCell);
+
+      contactTableBody.appendChild(row);
+    });
+  });
+};
+
+registerForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const email = document.getElementById("registerEmail").value.trim();
+  const password = document.getElementById("registerPassword").value;
+
+  try {
+    await createUserWithEmailAndPassword(auth, email, password);
+    registerForm.reset();
+    window.alert("Registrasi berhasil. Anda sudah login.");
+  } catch (error) {
+    window.alert(`Registrasi gagal: ${error.message}`);
+  }
+});
+
+loginForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const email = document.getElementById("loginEmail").value.trim();
+  const password = document.getElementById("loginPassword").value;
+
+  try {
+    await signInWithEmailAndPassword(auth, email, password);
+    loginForm.reset();
+    window.alert("Login berhasil.");
+  } catch (error) {
+    window.alert(`Login gagal: ${error.message}`);
+  }
+});
+
+logoutBtn.addEventListener("click", async () => {
+  try {
+    await signOut(auth);
+  } catch (error) {
+    window.alert(`Logout gagal: ${error.message}`);
+  }
+});
+
+onAuthStateChanged(auth, (user) => {
+  if (unsubscribeContacts) {
+    unsubscribeContacts();
+    unsubscribeContacts = null;
   }
 
-  Object.entries(data).forEach(([id, contact]) => {
-    const row = document.createElement("tr");
+  currentUser = user;
 
-    [contact.name, contact.email, contact.phone, contact.city, contact.note].forEach((value) => {
-      const cell = document.createElement("td");
-      cell.textContent = value || "-";
-      row.appendChild(cell);
-    });
-
-    const actionCell = document.createElement("td");
-    actionCell.className = "text-center";
-    actionCell.appendChild(createActionButtons(id, contact));
-    row.appendChild(actionCell);
-
-    contactTableBody.appendChild(row);
-  });
+  if (currentUser) {
+    authStatus.textContent = `Login sebagai: ${currentUser.email}`;
+    logoutBtn.disabled = false;
+    toggleContactForm(true);
+    startContactsListener(currentUser.uid);
+  } else {
+    authStatus.textContent = "Belum login.";
+    logoutBtn.disabled = true;
+    toggleContactForm(false);
+    showEmptyRow("Silakan login untuk melihat data.");
+  }
 });
 
 contactForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+
+  if (!currentUser) {
+    window.alert("Silakan login terlebih dahulu.");
+    return;
+  }
 
   const values = getFormValues();
   const editingId = contactIdInput.value;
@@ -132,8 +237,10 @@ contactForm.addEventListener("submit", async (event) => {
   }
 
   try {
+    const contactsRef = contactsRefByUid(currentUser.uid);
+
     if (editingId) {
-      await update(ref(db, `contacts/${editingId}`), values);
+      await update(ref(db, `users/${currentUser.uid}/contacts/${editingId}`), values);
     } else {
       const newContactRef = push(contactsRef);
       await set(newContactRef, {

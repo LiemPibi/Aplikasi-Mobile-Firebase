@@ -23,3 +23,7 @@ h2 {
 .action-btn {
   min-width: 80px;
 }
+
+#authStatus {
+  font-weight: 500;
+}
